@@ -16,7 +16,9 @@ const UPSTREAM_DOH_SERVERS = [
 ];
 
 const GLOBAL_AUTH_TOKEN = ""; // token如果为空则无需验证
-// const CACHE_MAX_AGE_SECONDS = 300; // DNS查询缓存时间，单位秒
+const CACHE_TTL_SECONDS = 300; // 最大缓存时间（秒）
+const MIN_CACHE_TTL_SECONDS = 60; // 最小缓存时间（秒）
+const TIMEOUT_MS = 500; // 超时时间（毫秒）
 
 export default {
   async fetch(request) {
@@ -81,11 +83,27 @@ async function handleDnsQuery(request) {
     return new Response("Method Not Allowed", { status: 405 });
   }
 
-  const response = await forwardDnsQuery(query);
+  // 获取上游响应和缓存控制信息
+  const { response, upstreamCacheControl } = await forwardDnsQueryWithCacheControl(query);
   if (!response) return new Response("DNS query failed", { status: 502 });
 
+  // 计算缓存TTL
+  let cacheTtl = CACHE_TTL_SECONDS;
+  if (upstreamCacheControl) {
+    // 解析上游的 max-age 值
+    const maxAgeMatch = upstreamCacheControl.match(/max-age=(\d+)/);
+    if (maxAgeMatch) {
+      const upstreamMaxAge = parseInt(maxAgeMatch[1], 10);
+      cacheTtl = Math.max(MIN_CACHE_TTL_SECONDS, Math.min(upstreamMaxAge, CACHE_TTL_SECONDS));
+    }
+  }
+
   return new Response(response, {
-    headers: { "Content-Type": "application/dns-message" }
+    headers: { 
+      "Content-Type": "application/dns-message",
+      "Cache-Control": `public, max-age=${cacheTtl}`,
+      "Access-Control-Allow-Origin": "*"
+    }
   });
 }
 
@@ -123,12 +141,12 @@ async function handleDomainResolve(request) {
   }
 }
 
-async function forwardDnsQuery(dnsQuery, dnsServers = UPSTREAM_DOH_SERVERS) {
+async function forwardDnsQueryWithCacheControl(dnsQuery, dnsServers = UPSTREAM_DOH_SERVERS) {
   // 顺序尝试每个DNS服务器，失败时尝试下一个
   for (const dohServer of dnsServers) {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 500);
+      const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
       const response = await fetch(dohServer, {
         method: "POST",
@@ -143,7 +161,9 @@ async function forwardDnsQuery(dnsQuery, dnsServers = UPSTREAM_DOH_SERVERS) {
       clearTimeout(timeoutId);
 
       if (response.ok) {
-        return new Uint8Array(await response.arrayBuffer());
+        const upstreamCacheControl = response.headers.get("Cache-Control");
+        const responseData = new Uint8Array(await response.arrayBuffer());
+        return { response: responseData, upstreamCacheControl };
       } else {
         console.warn(`Upstream ${dohServer} returned status ${response.status}`);
       }
@@ -153,6 +173,11 @@ async function forwardDnsQuery(dnsQuery, dnsServers = UPSTREAM_DOH_SERVERS) {
     }
   }
   return null;
+}
+
+async function forwardDnsQuery(dnsQuery, dnsServers = UPSTREAM_DOH_SERVERS) {
+  const result = await forwardDnsQueryWithCacheControl(dnsQuery, dnsServers);
+  return result ? result.response : null;
 }
 
 async function queryDnsRecord(domain, recordType, dnsServers = UPSTREAM_DOH_SERVERS) {
