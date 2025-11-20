@@ -110,6 +110,7 @@ async function handleDnsQuery(request, context) {
     if (response.ok) {
       const responseHeaders = new Headers(response.headers);
       responseHeaders.set("Access-Control-Allow-Origin", "*");
+      responseHeaders.set("Cache-Control", `public, max-age=${CACHE_TTL_SECONDS}`);
 
       // 缓存写入 (仅限 GET)
       if (method === "GET") {
