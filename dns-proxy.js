@@ -16,6 +16,7 @@ const UPSTREAM_DOH_SERVERS = [
 ];
 
 const GLOBAL_AUTH_TOKEN = ""; // token如果为空则无需验证
+const CACHE_MAX_AGE_SECONDS = 300; // 缓存有效期（秒）
 
 export default {
   async fetch(request, env, context) {
@@ -45,9 +46,9 @@ export default {
     // 路由处理
     switch (path) {
       case "/dns-query":
-        return await handleDnsQuery(request);
+        return await handleDnsQuery(request, context);
       case "/resolve":
-        return await handleDomainResolve(request);
+        return await handleDomainResolve(request, context);
       default:
         return new Response("DNS Worker is running.", {
           headers: { "Content-Type": "text/plain; charset=utf-8" },
@@ -57,7 +58,23 @@ export default {
 };
 
 // 标准 DoH 处理 (纯反向代理)
-async function handleDnsQuery(request) {
+async function handleDnsQuery(request, context) {
+  // 构建缓存键
+  const cacheKey = new Request(request.url, request);
+  
+  // 尝试从缓存获取响应
+  const cachedResponse = await caches.default.match(cacheKey);
+  if (cachedResponse) {
+    // 返回缓存的响应，但更新Cache-Control头
+    const headers = new Headers(cachedResponse.headers);
+    headers.set('Cache-Control', `public, max-age=${CACHE_MAX_AGE_SECONDS}`);
+    return new Response(cachedResponse.body, {
+      status: cachedResponse.status,
+      statusText: cachedResponse.statusText,
+      headers: headers,
+    });
+  }
+
   // 顺序尝试每个DNS服务器，失败时尝试下一个
   for (const dohServer of UPSTREAM_DOH_SERVERS) {
     try {
@@ -87,7 +104,27 @@ async function handleDnsQuery(request) {
       clearTimeout(timeoutId);
 
       if (response.ok) {
-        // 直接返回上游服务器的响应
+        // 创建响应副本用于缓存
+        const responseClone = response.clone();
+        
+        // 设置缓存头
+        const cacheHeaders = new Headers(response.headers);
+        cacheHeaders.set('Cache-Control', `public, max-age=${CACHE_MAX_AGE_SECONDS}`);
+        
+        // 创建缓存响应
+        const cacheResponse = new Response(responseClone.body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: cacheHeaders,
+        });
+        
+        // 将响应存入缓存
+        context.waitUntil((async () => {
+          const cache = await caches.open('dns-cache');
+          await cache.put(cacheKey, cacheResponse);
+        })());
+        
+        // 返回响应
         return new Response(response.body, {
           status: response.status,
           statusText: response.statusText,
@@ -106,7 +143,7 @@ async function handleDnsQuery(request) {
 }
 
 // 域名解析处理
-async function handleDomainResolve(request) {
+async function handleDomainResolve(request, context) {
   if (request.method !== "GET") return jsonResponse({ error: "Method Not Allowed" }, 405);
 
   const url = new URL(request.url);
@@ -117,7 +154,25 @@ async function handleDomainResolve(request) {
   const customDns = url.searchParams.get("server");
   const dnsServer = customDns || UPSTREAM_DOH_SERVERS[0];
 
+  // 构建缓存键
+  const cacheKey = new Request(request.url, request);
+  
+  // 尝试从缓存获取响应
+  const cachedResponse = await caches.default.match(cacheKey);
+  if (cachedResponse) {
+    // 返回缓存的响应，但更新Cache-Control头
+    const headers = new Headers(cachedResponse.headers);
+    headers.set('Cache-Control', `public, max-age=${CACHE_MAX_AGE_SECONDS}`);
+    return new Response(cachedResponse.body, {
+      status: cachedResponse.status,
+      statusText: cachedResponse.statusText,
+      headers: headers,
+    });
+  }
+
   try {
+    let result;
+    
     if (!recordType) {
       // 如果没有指定类型，查询A和AAAA记录
       const controller = new AbortController();
@@ -166,12 +221,12 @@ async function handleDomainResolve(request) {
         aaaaResult = parseDnsResponse(aaaaResponseData, domain, "AAAA");
       }
 
-      return jsonResponse({
+      result = {
         domain,
         types: ["A", "AAAA"],
         status: "success",
         results: { A: aResult, AAAA: aaaaResult }
-      });
+      };
     } else {
       // 查询指定类型的记录
       const upstreamUrl = new URL(dnsServer);
@@ -193,12 +248,36 @@ async function handleDomainResolve(request) {
 
       if (response.ok) {
         const responseData = new Uint8Array(await response.arrayBuffer());
-        const result = parseDnsResponse(responseData, domain, recordType);
-        return jsonResponse(result);
+        result = parseDnsResponse(responseData, domain, recordType);
       } else {
         return jsonResponse({ error: "DNS query failed", domain, type: recordType }, 502);
       }
     }
+    
+    // 创建响应
+    const response = jsonResponse(result);
+    
+    // 创建响应副本用于缓存
+    const responseClone = response.clone();
+    
+    // 设置缓存头
+    const cacheHeaders = new Headers(response.headers);
+    cacheHeaders.set('Cache-Control', `public, max-age=${CACHE_MAX_AGE_SECONDS}`);
+    
+    // 创建缓存响应
+    const cacheResponse = new Response(responseClone.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: cacheHeaders,
+    });
+    
+    // 将响应存入缓存
+    context.waitUntil((async () => {
+      const cache = await caches.open('dns-cache');
+      await cache.put(cacheKey, cacheResponse);
+    })());
+    
+    return response;
   } catch (error) {
     return jsonResponse({ error: "Internal Server Error", message: error.message }, 500);
   }
