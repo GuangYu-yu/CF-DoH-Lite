@@ -7,7 +7,8 @@ const UPSTREAM_DOH_SERVERS = [
 // 配置
 const GLOBAL_AUTH_TOKEN = ""; // token如果为空则无需验证
 const TIMEOUT_MS = 500; // 超时时间（毫秒）
-const CACHE_TTL_SECONDS = 300; // 缓存时间（秒）
+const CACHE_TTL_SECONDS = 300; // 最大缓存时间（秒）
+const MIN_CACHE_TTL_SECONDS = 60; // 最小缓存时间（秒）
 
 export default {
   async fetch(request, env, context) {
@@ -110,13 +111,27 @@ async function handleDnsQuery(request, context) {
     if (response.ok) {
       const responseHeaders = new Headers(response.headers);
       responseHeaders.set("Access-Control-Allow-Origin", "*");
-      responseHeaders.set("Cache-Control", `public, max-age=${CACHE_TTL_SECONDS}`);
+      
+      // 从上游响应获取缓存控制信息
+      const upstreamCacheControl = response.headers.get("Cache-Control");
+      let cacheTtl = CACHE_TTL_SECONDS;
+      
+      if (upstreamCacheControl) {
+        // 解析上游的 max-age 值
+        const maxAgeMatch = upstreamCacheControl.match(/max-age=(\d+)/);
+        if (maxAgeMatch) {
+          const upstreamMaxAge = parseInt(maxAgeMatch[1], 10);
+          cacheTtl = Math.max(MIN_CACHE_TTL_SECONDS, Math.min(upstreamMaxAge, CACHE_TTL_SECONDS));
+        }
+      }
+      
+      responseHeaders.set("Cache-Control", `public, max-age=${cacheTtl}`);
 
       // 缓存写入 (仅限 GET)
       if (method === "GET") {
           const responseToCache = response.clone();
           const cacheHeaders = new Headers(responseToCache.headers);
-          cacheHeaders.set("Cache-Control", `public, max-age=${CACHE_TTL_SECONDS}`);
+          cacheHeaders.set("Cache-Control", `public, max-age=${cacheTtl}`);
           cacheHeaders.set("Access-Control-Allow-Origin", "*");
           
           const cacheEntry = new Response(responseToCache.body, {
