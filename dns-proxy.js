@@ -72,11 +72,7 @@ async function handleDnsQuery(request, context) {
   // 准备请求体 (仅限 POST)
   let requestBody = null;
   if (method === "POST") {
-    try {
-      requestBody = await request.arrayBuffer();
-    } catch (e) {
-      return new Response("Bad Request: Failed to read body", { status: 400 });
-    }
+    requestBody = await request.arrayBuffer();
   }
 
   // 轮询上游服务器
@@ -84,68 +80,60 @@ async function handleDnsQuery(request, context) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
-    try {
-      const upstreamUrl = new URL(dohServer);
+    const upstreamUrl = new URL(dohServer);
 
-      // 如果是 GET，将查询参数复制到上游 URL
+    // 如果是 GET，将查询参数复制到上游 URL
+    if (method === "GET") {
+      const requestUrl = new URL(request.url);
+      upstreamUrl.search = requestUrl.search;
+    }
+
+    // 构建 Fetch 选项
+    const fetchOptions = {
+      method: method,
+      headers: {
+        "Accept": "application/dns-message",
+      },
+      signal: controller.signal,
+    };
+
+    // 如果是 POST，附加 Body 和 Content-Type
+    if (method === "POST") {
+      fetchOptions.headers["Content-Type"] = "application/dns-message";
+      fetchOptions.body = requestBody;
+    }
+
+    const response = await fetch(upstreamUrl, fetchOptions);
+
+    clearTimeout(timeoutId);
+
+    if (response.ok) {
+      const responseHeaders = new Headers(response.headers);
+      responseHeaders.set("Access-Control-Allow-Origin", "*");
+
+      // 缓存写入 (仅限 GET)
       if (method === "GET") {
-        const requestUrl = new URL(request.url);
-        upstreamUrl.search = requestUrl.search;
+          const responseToCache = response.clone();
+          const cacheHeaders = new Headers(responseToCache.headers);
+          cacheHeaders.set("Cache-Control", `public, max-age=${CACHE_TTL_SECONDS}`);
+          cacheHeaders.set("Access-Control-Allow-Origin", "*");
+          
+          const cacheEntry = new Response(responseToCache.body, {
+              status: responseToCache.status,
+              statusText: responseToCache.statusText,
+              headers: cacheHeaders
+          });
+          
+          context.waitUntil(cache.put(request.clone(), cacheEntry));
       }
 
-      // 构建 Fetch 选项
-      const fetchOptions = {
-        method: method,
-        headers: {
-          "Accept": "application/dns-message",
-        },
-        signal: controller.signal,
-      };
-
-      // 如果是 POST，附加 Body 和 Content-Type
-      if (method === "POST") {
-        fetchOptions。headers["Content-Type"] = "application/dns-message";
-        fetchOptions。body = requestBody;
-      }
-
-      const response = await fetch(upstreamUrl, fetchOptions);
-
-      clearTimeout(timeoutId);
-
-      if (response.ok) {
-        const responseHeaders = new Headers(response.headers);
-        responseHeaders。set("Access-Control-Allow-Origin"， "*");
-
-        // 缓存写入 (仅限 GET)
-        if (method === "GET") {
-            const responseToCache = response.clone();
-            const cacheHeaders = new Headers(responseToCache.headers);
-            cacheHeaders.set("Cache-Control", `public, max-age=${CACHE_TTL_SECONDS}`);
-            cacheHeaders.set("Access-Control-Allow-Origin", "*");
-            
-            const cacheEntry = new Response(responseToCache.body, {
-                status: responseToCache。status，
-                statusText: responseToCache。statusText，
-                headers: cacheHeaders
-            });
-            
-            context.waitUntil(cache.put(request.clone(), cacheEntry));
-        }
-
-        return new Response(response。body， {
-          status: response。status，
-          statusText: response。statusText，
-          headers: responseHeaders,
-        });
-      } else {
-        console.warn(`Upstream ${dohServer} failed: ${response。status}`);
-      }
-    } catch (error) {
-      clearTimeout(timeoutId);
-      console.error(`DNS query failed for ${dohServer}:`, error.message);
-      continue; // 尝试下一个服务器
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: responseHeaders,
+      });
     }
   }
   
-  return new Response("All upstream DNS servers failed.", { status: 502 });
+  return new Response("failed", { status: 502 });
 }
