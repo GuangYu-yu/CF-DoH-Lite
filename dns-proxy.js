@@ -31,18 +31,17 @@ export default {
     if (GLOBAL_AUTH_TOKEN) {
       const token = url.searchParams.get("token");
       if (!token || token !== GLOBAL_AUTH_TOKEN) {
-        return new Response("Authentication failed", { status: 403 });
+        return new Response(null, { status: 403 });
       }
     }
 
     // 路由处理
-    if (path === "/dns-query") {
-      return await handleDnsQuery(request, context);
+    switch (path) {
+      case "/dns-query":
+        return await handleDnsQuery(request, context);
+      default:
+        return new Response(null, { status: 200 });
     }
-
-    return new Response("DNS Worker is running.", {
-      headers: { "Content-Type": "text/plain; charset=utf-8" },
-    });
   },
 };
 
@@ -51,7 +50,7 @@ async function handleDnsQuery(request, context) {
 
   // 仅允许 GET 和 POST
   if (method !== "GET" && method !== "POST") {
-    return new Response("Method Not Allowed", { status: 405 });
+    return new Response(null, { status: 405 });
   }
 
   const cache = caches.default;
@@ -151,5 +150,5 @@ async function handleDnsQuery(request, context) {
     }
   }
   
-  return new Response("failed", { status: 502 });
+  return new Response(null, { status: 502 });
 }
