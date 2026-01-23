@@ -19,6 +19,7 @@ const GLOBAL_AUTH_TOKEN = ""; // token如果为空则无需验证
 const CACHE_TTL_SECONDS = 300; // 最大缓存时间（秒）
 const MIN_CACHE_TTL_SECONDS = 60; // 最小缓存时间（秒）
 const TIMEOUT_MS = 500; // 超时时间（毫秒）
+const decoder = new TextDecoder(); // 全局 TextDecoder 实例
 
 export default {
   async fetch(request) {
@@ -136,12 +137,12 @@ async function handleDomainResolve(request) {
 }
 
 async function forwardDnsQueryWithCacheControl(dnsQuery, dnsServers = UPSTREAM_DOH_SERVERS) {
-  // 顺序尝试每个DNS服务器，失败时尝试下一个
-  for (const dohServer of dnsServers) {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  // 并发请求所有 DNS 服务器，使用 Promise.any 取最快成功的
+  const promises = dnsServers.map(async (dohServer) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
+    try {
       const response = await fetch(dohServer, {
         method: "POST",
         headers: {
@@ -158,12 +159,20 @@ async function forwardDnsQueryWithCacheControl(dnsQuery, dnsServers = UPSTREAM_D
         const upstreamCacheControl = response.headers.get("Cache-Control");
         const responseData = new Uint8Array(await response.arrayBuffer());
         return { response: responseData, upstreamCacheControl };
+      } else {
+        throw 0; // 抛出轻量级异常，触发 Promise.any 切换
       }
     } catch (error) {
-      continue;
+      clearTimeout(timeoutId);
+      throw error; // 继续抛出，让 Promise.any 处理
     }
+  });
+
+  try {
+    return await Promise.any(promises);
+  } catch (error) {
+    return null; // 所有上游都失败
   }
-  return null;
 }
 
 async function forwardDnsQuery(dnsQuery, dnsServers = UPSTREAM_DOH_SERVERS) {
@@ -294,16 +303,43 @@ function parseDnsAnswer(response, offset) {
   
   let data = null;
   // 解析 IP 或 域名
-  if (type === 1 && dataLen === 4) { // A 记录 (IPv4)
-    data = `${response[current]}.${response[current+1]}.${response[current+2]}.${response[current+3]}`;
-  } else if (type === 28 && dataLen === 16) { // AAAA 记录 (IPv6)
-    data = parseIPv6(response, current);
-  } else if (type === 5) { // CNAME (别名)
-     const cnameRes = parseDnsName(response, current);
-     data = cnameRes ? cnameRes.name : null;
+  switch (type) {
+    case 1: // A 记录 (IPv4)
+      if (dataLen === 4) {
+        data = `${response[current]}.${response[current+1]}.${response[current+2]}.${response[current+3]}`;
+      }
+      break;
+    case 28: // AAAA 记录 (IPv6)
+      if (dataLen === 16) {
+        data = parseIPv6(response, current);
+      }
+      break;
+    case 5: // CNAME (别名)
+      const cnameRes = parseDnsName(response, current);
+      data = cnameRes ? cnameRes.name : null;
+      break;
+    case 15: // MX
+      const preference = view.getUint16(current, false);
+      const mxRes = parseDnsName(response, current + 2);
+      data = { preference, exchange: mxRes ? mxRes.name : null };
+      break;
+    case 16: // TXT
+      const parts = [];
+      let txtOffset = 0;
+      while (txtOffset < dataLen) {
+        const len = response[current + txtOffset];
+        parts.push(decoder.decode(response.slice(current + txtOffset + 1, current + txtOffset + 1 + len)));
+        txtOffset += 1 + len;
+      }
+      data = parts.join(""); 
+      break;
+    case 2: // NS
+      const nsRes = parseDnsName(response, current);
+      data = nsRes ? nsRes.name : null;
+      break;
   }
 
-  const typeMap = { 1: "A", 28: "AAAA", 5: "CNAME" };
+  const typeMap = { 1: "A", 28: "AAAA", 5: "CNAME", 15: "MX", 16: "TXT", 2: "NS" };
   
   return { 
     name: nameRes.name, 
