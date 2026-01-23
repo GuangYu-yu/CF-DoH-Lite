@@ -337,9 +337,21 @@ function parseDnsAnswer(response, offset) {
       const nsRes = parseDnsName(response, current);
       data = nsRes ? nsRes.name : null;
       break;
+    case 33: // SRV
+      const priority = view.getUint16(current, false);
+      const weight = view.getUint16(current + 2, false);
+      const port = view.getUint16(current + 4, false);
+      const targetRes = parseDnsName(response, current + 6);
+      data = { 
+        priority, 
+        weight, 
+        port, 
+        target: targetRes ? targetRes.name : null 
+      };
+      break;
   }
 
-  const typeMap = { 1: "A", 28: "AAAA", 5: "CNAME", 15: "MX", 16: "TXT", 2: "NS" };
+  const typeMap = { 1: "A", 28: "AAAA", 5: "CNAME", 15: "MX", 16: "TXT", 2: "NS", 33: "SRV" };
   
   return { 
     name: nameRes.name, 
